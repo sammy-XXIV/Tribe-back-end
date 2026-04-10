@@ -138,6 +138,19 @@ def worker():
 t = threading.Thread(target=worker, daemon=True)
 t.start()
 
+# Self-ping to keep Render free tier awake
+def self_ping():
+    import urllib.request
+    while True:
+        time.sleep(600)  # ping every 10 minutes
+        try:
+            urllib.request.urlopen('https://tribe-back-end.onrender.com/health', timeout=10)
+        except:
+            pass
+
+ping_thread = threading.Thread(target=self_ping, daemon=True)
+ping_thread.start()
+
 
 @app.route('/queue', methods=['POST'])
 def add_to_queue():
@@ -201,10 +214,9 @@ def get_status(queue_id):
 def get_following():
     username = request.args.get('userName', '').strip()
     cursor = request.args.get('cursor', '')
-    count = request.args.get('count', '200')
     if not username:
         return jsonify({'error': 'Missing userName'}), 400
-    url = '{}/twitter/user/following?userName={}&count={}'.format(API_BASE, username, count)
+    url = '{}/twitter/user/followings?userName={}&pageSize=200'.format(API_BASE, username)
     if cursor:
         url += '&cursor=' + cursor
     try:
@@ -219,10 +231,9 @@ def get_following():
 def get_followers():
     username = request.args.get('userName', '').strip()
     cursor = request.args.get('cursor', '')
-    count = request.args.get('count', '200')
     if not username:
         return jsonify({'error': 'Missing userName'}), 400
-    url = '{}/twitter/user/followers?userName={}&count={}'.format(API_BASE, username, count)
+    url = '{}/twitter/user/followers?userName={}&pageSize=200'.format(API_BASE, username)
     if cursor:
         url += '&cursor=' + cursor
     try:
