@@ -197,6 +197,42 @@ def get_status(queue_id):
     return jsonify({'status': 'unknown'})
 
 
+@app.route('/following', methods=['GET'])
+def get_following():
+    username = request.args.get('userName', '').strip()
+    cursor = request.args.get('cursor', '')
+    count = request.args.get('count', '200')
+    if not username:
+        return jsonify({'error': 'Missing userName'}), 400
+    url = '{}/twitter/user/following?userName={}&count={}'.format(API_BASE, username, count)
+    if cursor:
+        url += '&cursor=' + cursor
+    try:
+        r = requests.get(url, headers={'X-API-Key': TWITTER_API_KEY}, timeout=15)
+        time.sleep(DELAY_BETWEEN_REQUESTS)
+        return jsonify(r.json()), r.status_code
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/followers', methods=['GET'])
+def get_followers():
+    username = request.args.get('userName', '').strip()
+    cursor = request.args.get('cursor', '')
+    count = request.args.get('count', '200')
+    if not username:
+        return jsonify({'error': 'Missing userName'}), 400
+    url = '{}/twitter/user/followers?userName={}&count={}'.format(API_BASE, username, count)
+    if cursor:
+        url += '&cursor=' + cursor
+    try:
+        r = requests.get(url, headers={'X-API-Key': TWITTER_API_KEY}, timeout=15)
+        time.sleep(DELAY_BETWEEN_REQUESTS)
+        return jsonify(r.json()), r.status_code
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok', 'queue_size': request_queue.qsize()})
