@@ -10,8 +10,21 @@ import os
 app = Flask(__name__)
 CORS(app)
 
-TWITTER_API_KEY = os.environ.get('TWITTER_API_KEY', '')
-API_BASE = 'https://api.twitterapi.io'
+TWITTER_API_KEY = os.environ.get('TWITTER_API_KEY', '')  # twitterapi.io key (kept for search)
+BEARER_TOKEN = os.environ.get('BEARER_TOKEN', '')
+X_API_BASE = 'https://api.twitter.com/2'
+
+def x_headers():
+    return {'Authorization': 'Bearer ' + BEARER_TOKEN}
+
+def get_user_id(username):
+    r = requests.get(
+        X_API_BASE + '/users/by/username/' + username,
+        headers=x_headers(), timeout=15
+    )
+    time.sleep(1)
+    if not r.ok: return None
+    return r.json().get('data', {}).get('id')
 
 # --- In-memory queue and results store ---
 request_queue = queue.Queue()
@@ -210,19 +223,46 @@ def get_status(queue_id):
     return jsonify({'status': 'unknown'})
 
 
+USER_FIELDS = 'id,name,username,profile_image_url,verified,public_metrics,created_at'
+
 @app.route('/following', methods=['GET'])
 def get_following():
     username = request.args.get('userName', '').strip()
     cursor = request.args.get('cursor', '')
     if not username:
         return jsonify({'error': 'Missing userName'}), 400
-    url = '{}/twitter/user/followings?userName={}&pageSize=200'.format(API_BASE, username)
-    if cursor:
-        url += '&cursor=' + cursor
     try:
-        r = requests.get(url, headers={'x-api-key': TWITTER_API_KEY}, timeout=15)
+        uid = get_user_id(username)
+        if not uid:
+            return jsonify({'error': 'User not found'}), 404
+        url = '{}/users/{}/following?max_results=1000&user.fields={}'.format(X_API_BASE, uid, USER_FIELDS)
+        if cursor:
+            url += '&pagination_token=' + cursor
+        r = requests.get(url, headers=x_headers(), timeout=15)
         time.sleep(DELAY_BETWEEN_REQUESTS)
-        return jsonify(r.json()), r.status_code
+        data = r.json()
+        # Normalize to match frontend expectations
+        users = data.get('data', [])
+        # Map X API fields to twitterapi.io style
+        normalized = []
+        for u in users:
+            pm = u.get('public_metrics', {})
+            normalized.append({
+                'userName': u.get('username', ''),
+                'name': u.get('name', ''),
+                'profilePicture': u.get('profile_image_url', '').replace('_normal', '_400x400'),
+                'isBlueVerified': u.get('verified', False),
+                'followers': pm.get('followers_count', 0),
+                'following': pm.get('following_count', 0),
+                'mediaCount': pm.get('tweet_count', 0),
+                'id': u.get('id', '')
+            })
+        next_token = data.get('meta', {}).get('next_token')
+        return jsonify({
+            'followings': normalized,
+            'has_next_page': bool(next_token),
+            'next_cursor': next_token or ''
+        }), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -233,13 +273,36 @@ def get_followers():
     cursor = request.args.get('cursor', '')
     if not username:
         return jsonify({'error': 'Missing userName'}), 400
-    url = '{}/twitter/user/followers?userName={}&pageSize=200'.format(API_BASE, username)
-    if cursor:
-        url += '&cursor=' + cursor
     try:
-        r = requests.get(url, headers={'x-api-key': TWITTER_API_KEY}, timeout=15)
+        uid = get_user_id(username)
+        if not uid:
+            return jsonify({'error': 'User not found'}), 404
+        url = '{}/users/{}/followers?max_results=1000&user.fields={}'.format(X_API_BASE, uid, USER_FIELDS)
+        if cursor:
+            url += '&pagination_token=' + cursor
+        r = requests.get(url, headers=x_headers(), timeout=15)
         time.sleep(DELAY_BETWEEN_REQUESTS)
-        return jsonify(r.json()), r.status_code
+        data = r.json()
+        users = data.get('data', [])
+        normalized = []
+        for u in users:
+            pm = u.get('public_metrics', {})
+            normalized.append({
+                'userName': u.get('username', ''),
+                'name': u.get('name', ''),
+                'profilePicture': u.get('profile_image_url', '').replace('_normal', '_400x400'),
+                'isBlueVerified': u.get('verified', False),
+                'followers': pm.get('followers_count', 0),
+                'following': pm.get('following_count', 0),
+                'mediaCount': pm.get('tweet_count', 0),
+                'id': u.get('id', '')
+            })
+        next_token = data.get('meta', {}).get('next_token')
+        return jsonify({
+            'followers': normalized,
+            'has_next_page': bool(next_token),
+            'next_cursor': next_token or ''
+        }), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -251,4 +314,3 @@ def health():
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000)
-
