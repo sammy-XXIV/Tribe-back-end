@@ -225,29 +225,32 @@ def get_status(queue_id):
 
 USER_FIELDS = 'id,name,username,profile_image_url,verified,public_metrics,created_at'
 
-@app.route('/following', methods=['GET'])
-def get_following():
-    username = request.args.get('userName', '').strip()
-    cursor = request.args.get('cursor', '')
-    if not username:
-        return jsonify({'error': 'Missing userName'}), 400
-    try:
-        uid = get_user_id(username)
-        if not uid:
-            return jsonify({'error': 'User not found'}), 404
-        url = '{}/users/{}/following?max_results=1000&user.fields={}'.format(X_API_BASE, uid, USER_FIELDS)
+# --- Tribe queue system ---
+tribe_queue = queue.Queue()
+tribe_results = {}
+tribe_positions = {}
+tribe_order = []
+tribe_lock = threading.Lock()
+
+def fetch_user_data(username):
+    uid = get_user_id(username)
+    if not uid:
+        return None, None, 'User @{} not found.'.format(username)
+
+    def fetch_page(endpoint, cursor=None):
+        url = '{}/users/{}/{}?max_results=1000&user.fields={}'.format(
+            X_API_BASE, uid, endpoint, USER_FIELDS)
         if cursor:
             url += '&pagination_token=' + cursor
         r = requests.get(url, headers=x_headers(), timeout=15)
-        time.sleep(DELAY_BETWEEN_REQUESTS)
-        data = r.json()
-        # Normalize to match frontend expectations
-        users = data.get('data', [])
-        # Map X API fields to twitterapi.io style
-        normalized = []
+        time.sleep(2)
+        return r.json()
+
+    def normalize(users):
+        result = []
         for u in users:
             pm = u.get('public_metrics', {})
-            normalized.append({
+            result.append({
                 'userName': u.get('username', ''),
                 'name': u.get('name', ''),
                 'profilePicture': u.get('profile_image_url', '').replace('_normal', '_400x400'),
@@ -257,54 +260,89 @@ def get_following():
                 'mediaCount': pm.get('tweet_count', 0),
                 'id': u.get('id', '')
             })
-        next_token = data.get('meta', {}).get('next_token')
-        return jsonify({
-            'followings': normalized,
-            'has_next_page': bool(next_token),
-            'next_cursor': next_token or ''
-        }), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return result
+
+    # Fetch following (1 page)
+    f_data = fetch_page('following')
+    followings = normalize(f_data.get('data', []))
+
+    # Fetch followers (1 page)
+    r_data = fetch_page('followers')
+    followers = normalize(r_data.get('data', []))
+
+    return followings, followers, None
 
 
-@app.route('/followers', methods=['GET'])
-def get_followers():
-    username = request.args.get('userName', '').strip()
-    cursor = request.args.get('cursor', '')
+def tribe_worker():
+    while True:
+        queue_id = tribe_queue.get()
+        try:
+            with tribe_lock:
+                username = tribe_positions.get(queue_id)
+                if not username:
+                    continue
+            tribe_results[queue_id] = {'status': 'processing'}
+            followings, followers, error = fetch_user_data(username)
+            if error:
+                tribe_results[queue_id] = {'status': 'error', 'message': error}
+            else:
+                tribe_results[queue_id] = {
+                    'status': 'done',
+                    'followings': followings,
+                    'followers': followers
+                }
+        except Exception as e:
+            tribe_results[queue_id] = {'status': 'error', 'message': str(e)}
+        finally:
+            with tribe_lock:
+                if queue_id in tribe_order:
+                    tribe_order.remove(queue_id)
+            tribe_queue.task_done()
+
+tribe_thread = threading.Thread(target=tribe_worker, daemon=True)
+tribe_thread.start()
+
+
+@app.route('/tribe/queue', methods=['POST'])
+def tribe_add_queue():
+    data = request.get_json()
+    username = (data or {}).get('username', '').strip().lstrip('@')
     if not username:
-        return jsonify({'error': 'Missing userName'}), 400
-    try:
-        uid = get_user_id(username)
-        if not uid:
-            return jsonify({'error': 'User not found'}), 404
-        url = '{}/users/{}/followers?max_results=1000&user.fields={}'.format(X_API_BASE, uid, USER_FIELDS)
-        if cursor:
-            url += '&pagination_token=' + cursor
-        r = requests.get(url, headers=x_headers(), timeout=15)
-        time.sleep(DELAY_BETWEEN_REQUESTS)
-        data = r.json()
-        users = data.get('data', [])
-        normalized = []
-        for u in users:
-            pm = u.get('public_metrics', {})
-            normalized.append({
-                'userName': u.get('username', ''),
-                'name': u.get('name', ''),
-                'profilePicture': u.get('profile_image_url', '').replace('_normal', '_400x400'),
-                'isBlueVerified': u.get('verified', False),
-                'followers': pm.get('followers_count', 0),
-                'following': pm.get('following_count', 0),
-                'mediaCount': pm.get('tweet_count', 0),
-                'id': u.get('id', '')
-            })
-        next_token = data.get('meta', {}).get('next_token')
-        return jsonify({
-            'followers': normalized,
-            'has_next_page': bool(next_token),
-            'next_cursor': next_token or ''
-        }), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Missing username'}), 400
+    queue_id = str(uuid.uuid4())
+    with tribe_lock:
+        tribe_positions[queue_id] = username
+        tribe_order.append(queue_id)
+        position = len(tribe_order)
+    tribe_queue.put(queue_id)
+    estimated_wait = (position - 1) * 25
+    return jsonify({'queue_id': queue_id, 'position': position, 'estimated_wait': estimated_wait})
+
+
+@app.route('/tribe/status/<queue_id>', methods=['GET'])
+def tribe_status(queue_id):
+    with tribe_lock:
+        position = tribe_order.index(queue_id) + 1 if queue_id in tribe_order else 0
+        estimated_wait = max(0, (position - 1) * 25)
+    result = tribe_results.get(queue_id)
+    if not result:
+        return jsonify({'status': 'queued', 'position': position, 'estimated_wait': estimated_wait})
+    if result['status'] == 'processing':
+        return jsonify({'status': 'processing', 'position': 0, 'estimated_wait': 5})
+    if result['status'] == 'error':
+        tribe_results.pop(queue_id, None)
+        tribe_positions.pop(queue_id, None)
+        return jsonify({'status': 'error', 'message': result['message']})
+    if result['status'] == 'done':
+        data = {
+            'status': 'done',
+            'followings': result['followings'],
+            'followers': result['followers']
+        }
+        tribe_results.pop(queue_id, None)
+        tribe_positions.pop(queue_id, None)
+        return jsonify(data)
+    return jsonify({'status': 'unknown'})
 
 
 @app.route('/health', methods=['GET'])
@@ -314,3 +352,4 @@ def health():
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000)
+
