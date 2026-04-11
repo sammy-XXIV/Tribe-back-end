@@ -25,7 +25,7 @@ DELAY_BETWEEN_REQUESTS = 2.0  # seconds between API calls
 def call_twitter(path, params):
     """Single rate-limited call to twitterapi.io"""
     url = API_BASE + path
-    resp = requests.get(url, headers={'X-API-Key': TWITTER_API_KEY}, params=params, timeout=15)
+    resp = requests.get(url, headers={'x-api-key': TWITTER_API_KEY}, params=params, timeout=15)
     time.sleep(DELAY_BETWEEN_REQUESTS)
     return resp
 
@@ -220,7 +220,7 @@ def get_following():
     if cursor:
         url += '&cursor=' + cursor
     try:
-        r = requests.get(url, headers={'X-API-Key': TWITTER_API_KEY}, timeout=15)
+        r = requests.get(url, headers={'x-api-key': TWITTER_API_KEY}, timeout=15)
         time.sleep(DELAY_BETWEEN_REQUESTS)
         return jsonify(r.json()), r.status_code
     except Exception as e:
@@ -237,7 +237,7 @@ def get_followers():
     if cursor:
         url += '&cursor=' + cursor
     try:
-        r = requests.get(url, headers={'X-API-Key': TWITTER_API_KEY}, timeout=15)
+        r = requests.get(url, headers={'x-api-key': TWITTER_API_KEY}, timeout=15)
         time.sleep(DELAY_BETWEEN_REQUESTS)
         return jsonify(r.json()), r.status_code
     except Exception as e:
